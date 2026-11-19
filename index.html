@@ -1,0 +1,821 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>右手定則 VR 實驗室</title>
+<meta name="description" content="用 Meta Quest 在 3D 空間中體驗安培右手定則、螺線管與載流導線受磁力（右手開掌定則）。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#e3e9f0; --ink:#1d2733; --muted:#4f5d6c; --accent:#d9480f; --blue:#1c7ed6; --card:rgba(255,255,255,.9); }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); overflow:hidden;
+    font-family:"Noto Sans TC","Microsoft JhengHei","PingFang TC",sans-serif; }
+  canvas { display:block; touch-action:none; }
+  #overlay { position:fixed; left:16px; top:16px; width:min(400px, calc(100vw - 32px)); box-sizing:border-box;
+    background:var(--card); backdrop-filter:blur(6px); border-radius:14px; padding:14px 16px; box-shadow:0 4px 18px rgba(0,0,0,.15); }
+  #overlay h1 { font-size:20px; margin:0 0 6px; }
+  #overlay p { margin:4px 0; font-size:14px; line-height:1.6; color:var(--muted); }
+  #overlay ul { margin:6px 0 0; padding-left:20px; font-size:13.5px; line-height:1.7; color:var(--muted); }
+  .btns { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  button.xr { font:inherit; font-weight:700; font-size:15px; padding:10px 16px; border-radius:10px; border:0;
+    background:var(--accent); color:#fff; cursor:pointer; }
+  button.xr.alt { background:var(--blue); }
+  button.xr:disabled { background:#9aa5b1; cursor:not-allowed; }
+  #fold { position:absolute; right:10px; top:8px; border:0; background:none; font-size:18px; cursor:pointer; color:var(--muted); }
+  #overlay.folded .body { display:none; }
+  #status { font-size:13px; color:var(--accent); }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <button id="fold" title="收合／展開">▾</button>
+  <h1>右手定則 VR 實驗室</h1>
+  <div class="body">
+    <p>用 Meta Quest 走進 3D 實驗台，親手比出右手、觀察電流、磁場與磁力的方向關係。</p>
+    <div class="btns">
+      <button class="xr" id="enterVR" disabled>進入 VR</button>
+      <button class="xr alt" id="enterAR" disabled>穿透模式（AR）</button>
+    </div>
+    <p id="status">正在檢查裝置是否支援 WebXR…</p>
+    <ul>
+      <li><b>Quest：</b>用手把射線（或手勢捏合）點左側控制面板。</li>
+      <li><b>移動：</b>直接走路；左搖桿平滑移動；右搖桿往前推出現藍色拋物線，放開就瞬移過去；右搖桿左右旋轉實驗台。面板「回到原位」可歸位。</li>
+      <li><b>電腦：</b>W A S D 或方向鍵走路，Q／E 蹲低／升高，按住 Shift 走快一點；滑鼠拖曳轉視角、滾輪縮放，點按面板按鈕。</li>
+      <li><b>手機：</b>拖曳旋轉視角、雙指縮放，點按面板按鈕。</li>
+      <li>四個單元：直導線、螺線管、導線受力、挑戰題。</li>
+    </ul>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+
+const FONT = '"Noto Sans TC","Microsoft JhengHei","PingFang TC",sans-serif';
+try { await Promise.race([document.fonts.load('700 40px "Noto Sans TC"'), new Promise(r => setTimeout(r, 2500))]); } catch (e) {}
+
+const V3 = THREE.Vector3;
+const _Y = new V3(0, 1, 0);
+const AX = { X: new V3(1,0,0), Y: new V3(0,1,0), Z: new V3(0,0,1) };
+const SIX = [new V3(1,0,0), new V3(-1,0,0), new V3(0,1,0), new V3(0,-1,0), new V3(0,0,1), new V3(0,0,-1)];
+const C = { I: 0xf76707, B: 0x1c7ed6, F: 0x2f9e44, copper: 0xb87333 };
+
+/* ---------- renderer / scene ---------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const BG = new THREE.Color(0xe3e9f0);
+scene.background = BG;
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01, 50);
+const rig = new THREE.Group(); scene.add(rig); rig.add(camera);   // 玩家位置（移動／瞬移時移動整個 rig）
+const controls = new OrbitControls(camera, renderer.domElement);
+function frameDesktop() {
+  const a = innerWidth / innerHeight;
+  camera.position.set(0, 1.6, 0.35 + Math.max(0, 1.6 - a) * 1.3);
+  controls.target.set(-0.05, 1.2, -0.9);
+  controls.update();
+}
+frameDesktop();
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.7));
+const dl = new THREE.DirectionalLight(0xffffff, 1.5); dl.position.set(1, 3, 2); scene.add(dl);
+
+const env = new THREE.Group(); scene.add(env);
+const floor = new THREE.Mesh(new THREE.CircleGeometry(6, 64), new THREE.MeshStandardMaterial({ color: 0xd3dbe4, roughness: 1 }));
+floor.rotation.x = -Math.PI / 2; env.add(floor);
+const grid = new THREE.GridHelper(12, 48, 0xb0bccb, 0xc4ced9); grid.position.y = 0.001; env.add(grid);
+const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.4, 0.7, 48), new THREE.MeshStandardMaterial({ color: 0xf6f7f9, roughness: 0.8 }));
+pedestal.position.set(0, 0.35, -0.9); scene.add(pedestal);
+
+const stationRoot = new THREE.Group(); stationRoot.position.set(0, 1.15, -0.9); scene.add(stationRoot);
+const content = new THREE.Group(); stationRoot.add(content);
+
+/* ---------- helpers ---------- */
+function mat(color, o = {}) { return new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.05, ...o }); }
+function glow(color, o = {}) { return mat(color, { emissive: color, emissiveIntensity: 0.3, ...o }); }
+
+class Arrow3 extends THREE.Group {
+  constructor(color, r = 0.008) {
+    super(); this.r = r; this.m = glow(color);
+    this.shaft = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 1, 12), this.m);
+    this.head = new THREE.Mesh(new THREE.ConeGeometry(r * 2.6, r * 7, 16), this.m);
+    this.add(this.shaft, this.head);
+  }
+  set(origin, dir, len) {
+    this.position.copy(origin);
+    this.quaternion.setFromUnitVectors(_Y, dir.clone().normalize());
+    const hl = this.r * 7, sl = Math.max(0.001, len - hl);
+    this.shaft.scale.set(1, sl, 1); this.shaft.position.y = sl / 2;
+    this.head.position.y = sl + hl / 2;
+    this.len = len;
+    return this;
+  }
+}
+
+function makeLabel(text, { color = '#1d2733', bg = 'rgba(255,255,255,0.88)', size = 0.04 } = {}) {
+  const fs = 64, pad = 20, c = document.createElement('canvas'), ctx = c.getContext('2d');
+  ctx.font = `700 ${fs}px ${FONT}`;
+  const w = Math.ceil(ctx.measureText(text).width) + pad * 2, h = Math.round(fs * 1.45);
+  c.width = w; c.height = h;
+  ctx.font = `700 ${fs}px ${FONT}`;
+  ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(0, 0, w, h, h * 0.3); ctx.fill();
+  ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, w / 2, h / 2 + 3);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sp.renderOrder = 10; sp.scale.set(size * w / h, size, 1);
+  return sp;
+}
+
+class CircleCurve extends THREE.Curve {           // 繞 +Y 逆時針（俯視）
+  constructor(r, y = 0) { super(); this.r = r; this.y = y; }
+  getPoint(t, o = new V3()) { const a = t * Math.PI * 2; return o.set(this.r * Math.cos(a), this.y, -this.r * Math.sin(a)); }
+}
+class HelixCurve extends THREE.Curve {            // 沿 +X 前進，繞 +X 逆時針 → 內部磁場 +X
+  constructor(R, L, N) { super(); this.R = R; this.L = L; this.N = N; this.arcLengthDivisions = 1200; }
+  getPoint(t, o = new V3()) { const th = 2 * Math.PI * this.N * t; return o.set(-this.L / 2 + this.L * t, this.R * Math.cos(th), this.R * Math.sin(th)); }
+}
+
+const coneGeo = new THREE.ConeGeometry(0.011, 0.032, 12);
+const dotGeo = new THREE.SphereGeometry(0.008, 12, 8);
+const _t = new V3();
+class Flow {
+  constructor(curve, { count = 6, speed = 0.1, color = C.B, tube = 0.0022, line = true, glyph = 'cone', closed = true, scale = 1, lineOpacity = 0.45 } = {}) {
+    this.group = new THREE.Group(); this.curve = curve; this.speed = speed; this.sign = 1; this.glyph = glyph;
+    this.phase = Math.random();
+    this.lineMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: lineOpacity });
+    if (line) this.group.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 160, tube, 6, closed), this.lineMat));
+    this.gMat = glow(color, { transparent: true });
+    this.items = [];
+    for (let i = 0; i < count; i++) {
+      const m = new THREE.Mesh(glyph === 'cone' ? coneGeo : dotGeo, this.gMat);
+      m.scale.setScalar(scale); this.items.push(m); this.group.add(m);
+    }
+    this.update(0);
+  }
+  update(dt) {
+    this.phase = ((this.phase + dt * this.speed * this.sign) % 1 + 1) % 1;
+    const n = this.items.length;
+    for (let i = 0; i < n; i++) {
+      const u = (this.phase + i / n) % 1, m = this.items[i];
+      this.curve.getPointAt(u, m.position);
+      if (this.glyph === 'cone') {
+        this.curve.getTangentAt(u, _t); if (this.sign < 0) _t.negate();
+        m.quaternion.setFromUnitVectors(_Y, _t);
+      }
+    }
+  }
+  setOpacity(a) { this.gMat.opacity = a; this.lineMat.opacity = a * 0.5; }
+}
+
+/* ---------- hands ---------- */
+const skin = new THREE.MeshStandardMaterial({ color: 0xf0c09a, roughness: 0.65, transparent: true, opacity: 0.95 });
+function seg(len, r) {
+  const g = new THREE.CapsuleGeometry(r, len, 4, 10); g.rotateZ(-Math.PI / 2); g.translate(len / 2, 0, 0);
+  return new THREE.Mesh(g, skin);
+}
+function chain(lens, r, axis, angles) {
+  const root = new THREE.Group(); let parent = root;
+  lens.forEach((L, i) => {
+    const j = new THREE.Group(); j.position.x = i === 0 ? 0 : lens[i - 1];
+    j.quaternion.setFromAxisAngle(axis, angles[i]);
+    j.add(seg(L, r * (1 - 0.08 * i))); parent.add(j); parent = j;
+  });
+  return root;
+}
+const FINGERS = [[0.042, 0.027, 0.022], [0.046, 0.029, 0.023], [0.044, 0.027, 0.022], [0.036, 0.022, 0.019]];
+
+// 握拳右手：本地 +Y = 拇指；四指繞 +Y 逆時針彎曲
+function makeGripHand(thumbText, fingerText) {
+  const h = new THREE.Group(), R = 0.026;
+  [0.03, 0.008, -0.014, -0.034].forEach((y, i) => {
+    const c = chain(FINGERS[i], 0.0085, _Y, [0.3, 1.05, 0.95]); c.position.set(0, y, R); h.add(c);
+  });
+  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.088, 0.026), skin); palm.position.set(-0.04, -0.002, R + 0.004); h.add(palm);
+  const th = chain([0.036, 0.03], 0.0105, AX.Z, [0, 0.1]); th.position.set(-0.012, 0.04, R + 0.002); th.rotation.z = Math.PI / 2; h.add(th);
+  const arm = seg(0.09, 0.022); arm.position.set(-0.078, -0.004, R + 0.004); arm.rotation.y = Math.PI; h.add(arm);
+  const lt = makeLabel(thumbText, { color: '#d9480f', size: 0.032 }); lt.position.set(0, 0.15, R + 0.02); h.add(lt);
+  const lf = makeLabel(fingerText, { color: '#1864ab', size: 0.032 }); lf.position.set(0.02, -0.06, -0.06); h.add(lf);
+  return h;
+}
+// 開掌右手：本地 +X = 四指（B）、+Z = 拇指（I）、+Y = 掌心（F）
+function makeOpenHand() {
+  const h = new THREE.Group();
+  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.088, 0.026, 0.084), skin); palm.position.set(-0.044, 0, -0.002); h.add(palm);
+  [0.03, 0.01, -0.01, -0.03].forEach((z, i) => {
+    const c = chain(FINGERS[i], 0.0085, AX.Z, [0.03, 0.06, 0.05]); c.position.set(0, 0, z); h.add(c);
+  });
+  const th = chain([0.036, 0.03], 0.0105, _Y, [0, 0.05]); th.position.set(-0.055, 0, 0.04); th.rotation.y = -Math.PI / 2; h.add(th);
+  const arm = seg(0.09, 0.022); arm.position.set(-0.085, 0, -0.002); arm.rotation.y = Math.PI; h.add(arm);
+  h.add(new Arrow3(C.F, 0.006).set(new V3(-0.04, 0.015, 0), _Y, 0.1));
+  const l1 = makeLabel('拇指：電流 I', { color: '#d9480f', size: 0.03 }); l1.position.set(-0.06, 0.02, 0.15); h.add(l1);
+  const l2 = makeLabel('四指：磁場 B', { color: '#1864ab', size: 0.03 }); l2.position.set(0.16, 0, 0); h.add(l2);
+  const l3 = makeLabel('掌心推：磁力 F', { color: '#2b8a3e', size: 0.03 }); l3.position.set(-0.04, 0.14, 0); h.add(l3);
+  return h;
+}
+function orientOpenHand(h, B, F, I) {
+  h.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(B.clone().normalize(), F.clone().normalize(), I.clone().normalize()));
+}
+function makeNeedle() {
+  const g = new THREE.Group();
+  const geo = new THREE.ConeGeometry(0.007, 0.028, 4); geo.rotateZ(-Math.PI / 2); geo.translate(0.014, 0, 0);
+  const n = new THREE.Mesh(geo, mat(0xe03131)); const s = new THREE.Mesh(geo, mat(0xf1f3f5)); s.rotation.y = Math.PI;
+  g.add(n, s); g.scale.set(1, 0.5, 1);
+  const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, 0.012, 8), mat(0x495057)); g.add(pin);
+  return g;
+}
+function dirWord(v) {
+  const a = [[AX.Y, '向上'], [new V3(0,-1,0), '向下'], [AX.X, '向右'], [new V3(-1,0,0), '向左'], [AX.Z, '朝向你'], [new V3(0,0,-1), '遠離你']];
+  let best = a[0], bd = -2; for (const e of a) { const d = e[0].dot(v); if (d > bd) { bd = d; best = e; } } return best[1];
+}
+
+/* ---------- UI: buttons, panel, info board ---------- */
+class Btn {
+  constructor(label, w, h, onClick) {
+    this.label = label; this.onClick = onClick; this.active = false; this.hover = false;
+    this.c = document.createElement('canvas'); this.c.height = 128; this.c.width = Math.round(128 * w / h);
+    this.tex = new THREE.CanvasTexture(this.c); this.tex.colorSpace = THREE.SRGBColorSpace;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true }));
+    this.mesh.userData.ui = this; this.draw();
+  }
+  draw() {
+    const ctx = this.c.getContext('2d'), W = this.c.width, H = this.c.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = this.active ? '#d9480f' : (this.hover ? '#ffe8cc' : '#ffffff');
+    ctx.strokeStyle = this.hover ? '#d9480f' : (this.active ? '#d9480f' : '#adb5bd'); ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.roundRect(4, 4, W - 8, H - 8, 26); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = this.active ? '#ffffff' : '#1d2733';
+    let fs = 54; ctx.font = `700 ${fs}px ${FONT}`;
+    while (ctx.measureText(this.label).width > W - 32 && fs > 20) { fs -= 2; ctx.font = `700 ${fs}px ${FONT}`; }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(this.label, W / 2, H / 2 + 3);
+    this.tex.needsUpdate = true;
+  }
+  setLabel(l) { this.label = l; this.draw(); }
+  setActive(a) { if (a !== this.active) { this.active = a; this.draw(); } }
+  setHover(h) { if (h !== this.hover) { this.hover = h; this.draw(); } }
+}
+function textPlane(text, w, h, { color = '#4f5d6c', fs = 40 } = {}) {
+  const c = document.createElement('canvas'); c.height = 96; c.width = Math.round(96 * w / h);
+  const ctx = c.getContext('2d'); ctx.font = `500 ${fs}px ${FONT}`; ctx.fillStyle = color;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, c.width / 2, c.height / 2);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+}
+
+const uiTargets = [], ctxTargets = [], sceneTargets = [];
+const panel = new THREE.Group();
+panel.position.set(-0.68, 1.12, -0.6); panel.rotation.set(-0.35, 0.65, 0, 'YXZ'); scene.add(panel);
+{
+  const bg = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.52), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.82 }));
+  bg.position.z = -0.004; panel.add(bg);
+  const t = textPlane('控制面板', 0.3, 0.045, { color: '#1d2733', fs: 50 }); t.position.y = 0.225; panel.add(t);
+  const hint = textPlane('左搖桿：移動　右搖桿往前推再放開：瞬移　右搖桿左右：轉實驗台', 0.6, 0.04, { fs: 32 }); hint.position.y = -0.225; panel.add(hint);
+}
+const MODES = [['wire', '直導線'], ['coil', '螺線管'], ['force', '導線受力'], ['quiz', '挑戰題']];
+const tabBtns = {};
+MODES.forEach(([key, label], i) => {
+  const b = new Btn(label, 0.135, 0.06, () => setMode(key));
+  b.mesh.position.set(-0.2175 + i * 0.145, 0.165, 0); panel.add(b.mesh); uiTargets.push(b.mesh); tabBtns[key] = b;
+});
+const resetBtn = new Btn('回到原位', 0.18, 0.055, () => { stationRoot.rotation.set(0, 0, 0); rig.position.set(0, 0, 0); if (!renderer.xr.isPresenting) frameDesktop(); });
+resetBtn.mesh.position.set(0.19, -0.155, 0); panel.add(resetBtn.mesh); uiTargets.push(resetBtn.mesh);
+const ctxGroup = new THREE.Group(); panel.add(ctxGroup);
+function setCtx(defs) {
+  ctxGroup.clear(); ctxTargets.length = 0;
+  return defs.map((d, i) => {
+    const b = new Btn(d.label, 0.18, 0.06, d.onClick);
+    b.mesh.position.set(-0.19 + (i % 3) * 0.19, 0.075 - Math.floor(i / 3) * 0.08, 0);
+    ctxGroup.add(b.mesh); ctxTargets.push(b.mesh); return b;
+  });
+}
+
+const infoCanvas = document.createElement('canvas'); infoCanvas.width = 1280; infoCanvas.height = 440;
+const infoTex = new THREE.CanvasTexture(infoCanvas); infoTex.colorSpace = THREE.SRGBColorSpace;
+const infoBoard = new THREE.Mesh(new THREE.PlaneGeometry(1.06, 0.365), new THREE.MeshBasicMaterial({ map: infoTex, transparent: true }));
+infoBoard.position.set(0.02, 1.82, -1.42); infoBoard.rotation.x = 0.08; scene.add(infoBoard);
+function drawInfo(title, lines, foot = '') {
+  const ctx = infoCanvas.getContext('2d'), W = 1280, H = 440;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.94)'; ctx.beginPath(); ctx.roundRect(6, 6, W - 12, H - 12, 36); ctx.fill();
+  ctx.fillStyle = '#d9480f'; ctx.fillRect(48, 50, 10, 64);
+  ctx.fillStyle = '#1d2733'; ctx.font = `700 60px ${FONT}`; ctx.textBaseline = 'middle'; ctx.fillText(title, 80, 84);
+  ctx.font = `500 42px ${FONT}`;
+  lines.forEach((l, i) => {
+    const [txt, col] = Array.isArray(l) ? l : [l, '#2f3b48'];
+    let fs = 42; ctx.font = `500 ${fs}px ${FONT}`;
+    while (ctx.measureText(txt).width > W - 110 && fs > 26) { fs -= 1; ctx.font = `500 ${fs}px ${FONT}`; }
+    ctx.fillStyle = col; ctx.fillText(txt, 56, 172 + i * 64);
+  });
+  if (foot) { ctx.fillStyle = '#7b8794'; ctx.font = `500 32px ${FONT}`; ctx.fillText(foot, 56, H - 40); }
+  infoTex.needsUpdate = true;
+}
+
+/* ---------- modes ---------- */
+let current = null;
+function setMode(key) {
+  content.clear(); sceneTargets.length = 0;
+  for (const k in tabBtns) tabBtns[k].setActive(k === key);
+  current = ({ wire: modeWire, coil: modeCoil, force: modeForce, quiz: modeQuiz })[key]();
+}
+
+// 1) 直導線：安培右手定則
+function modeWire() {
+  const st = { sign: 1, I: 2, hand: true, compass: true };
+  const g = new THREE.Group(); content.add(g);
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.9, 16), mat(C.copper, { metalness: 0.6, roughness: 0.3 })));
+  const dots = new Flow(new THREE.LineCurve3(new V3(0, -0.45, 0), new V3(0, 0.45, 0)), { count: 12, color: 0xff922b, line: false, glyph: 'dot', closed: false, scale: 1.3 });
+  g.add(dots.group);
+  const iArrow = new Arrow3(C.I, 0.008); g.add(iArrow);
+  const iLabel = makeLabel('電流 I', { color: '#d9480f' }); iLabel.position.set(0.1, 0.54, 0); g.add(iLabel);
+  const rings = [];
+  for (const y of [0.3, 0.0, -0.18]) for (const r of [0.09, 0.16, 0.23]) {
+    const f = new Flow(new CircleCurve(r, y), { count: Math.round(3 + r * 22) }); f.r = r; rings.push(f); g.add(f.group);
+  }
+  const bLabel = makeLabel('磁場 B', { color: '#1864ab' }); bLabel.position.set(0.27, 0.36, 0.05); g.add(bLabel);
+  const comp = new THREE.Group(); comp.position.y = -0.36; g.add(comp);
+  const disk = new THREE.Mesh(new THREE.CylinderGeometry(0.31, 0.31, 0.008, 48), new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 }));
+  disk.position.y = -0.01; comp.add(disk);
+  const needles = [];
+  for (const r of [0.12, 0.24]) for (let k = 0; k < 8; k++) {
+    const a = k / 8 * Math.PI * 2 + (r > 0.2 ? Math.PI / 8 : 0);
+    const n = makeNeedle(); n.position.set(r * Math.cos(a), 0, r * Math.sin(a)); n.rotation.y = Math.PI / 2; comp.add(n); needles.push(n);
+  }
+  const hand = makeGripHand('拇指：電流 I', '四指：磁場 B'); hand.position.y = 0.14; hand.scale.setScalar(1.2); g.add(hand);
+
+  const btns = setCtx([
+    { label: '反轉電流', onClick: () => { st.sign *= -1; apply(); } },
+    { label: '電流 −', onClick: () => { st.I = Math.max(0, st.I - 1); apply(); } },
+    { label: '電流 ＋', onClick: () => { st.I = Math.min(3, st.I + 1); apply(); } },
+    { label: '右手：顯示', onClick: () => { st.hand = !st.hand; apply(); } },
+    { label: '羅盤：顯示', onClick: () => { st.compass = !st.compass; apply(); } },
+  ]);
+  function apply() {
+    const d = new V3(0, st.sign, 0);
+    dots.sign = st.sign; dots.speed = 0.12 * st.I; dots.group.visible = st.I > 0;
+    iArrow.visible = st.I > 0;
+    iArrow.set(new V3(0, st.sign > 0 ? 0.47 : 0.6, 0), d, 0.13);
+    hand.quaternion.setFromUnitVectors(_Y, d); hand.visible = st.hand;
+    for (const f of rings) { f.sign = st.sign; f.speed = 0.006 * st.I / f.r; f.setOpacity(st.I === 0 ? 0.06 : Math.min(1, 0.3 + 0.03 * st.I / f.r)); }
+    comp.visible = st.compass;
+    btns[3].setLabel(st.hand ? '右手：顯示' : '右手：隱藏'); btns[3].setActive(st.hand);
+    btns[4].setLabel(st.compass ? '羅盤：顯示' : '羅盤：隱藏'); btns[4].setActive(st.compass);
+    drawInfo('安培右手定則（直導線）', [
+      ['右手握住導線：拇指指向電流 I 的方向', '#c2410c'],
+      ['四指彎曲的方向 ＝ 磁場 B 環繞導線的方向', '#1864ab'],
+      st.I === 0 ? '目前無電流：沒有環形磁場，羅盤只受地磁影響指向北方'
+                 : `電流 I = ${st.I}（${st.sign > 0 ? '向上' : '向下'}）　俯視時磁場為${st.sign > 0 ? '逆' : '順'}時針；離導線越遠磁場越弱`,
+    ], '試試看：反轉電流，觀察羅盤指針與藍色箭頭一起反向');
+  }
+  apply();
+  const earth = new V3(0, 0, -0.06), Bv = new V3();
+  return {
+    update(dt) {
+      dots.update(dt); rings.forEach(f => f.update(dt));
+      for (const n of needles) {
+        const x = n.position.x, z = n.position.z, r2 = x * x + z * z;
+        Bv.set(z, 0, -x).multiplyScalar(st.sign * st.I * 0.02 / r2).add(earth);
+        const target = Math.atan2(-Bv.z, Bv.x);
+        let diff = target - n.rotation.y; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+        n.rotation.y += diff * Math.min(1, dt * 5);
+      }
+    }
+  };
+}
+
+// 螺線管組件（模式 2 與挑戰題共用）
+function buildCoil(parent, sign, opacity = 1) {
+  const helix = new HelixCurve(0.1, 0.44, 9);
+  parent.add(new THREE.Mesh(new THREE.TubeGeometry(helix, 900, 0.006, 8, false),
+    mat(C.copper, { metalness: 0.6, roughness: 0.3, transparent: opacity < 1, opacity, depthWrite: opacity >= 1 })));
+  const dots = new Flow(helix, { count: 70, color: 0xff922b, line: false, glyph: 'dot', closed: false, scale: 1.1, speed: 0.04 });
+  dots.sign = sign; parent.add(dots.group);
+  return dots;
+}
+
+// 2) 螺線管
+function modeCoil() {
+  const st = { sign: 1, hand: true, field: true };
+  const g = new THREE.Group(); content.add(g);
+  const dots = buildCoil(g, st.sign);
+  const fieldG = new THREE.Group(); g.add(fieldG);
+  const flows = [];
+  const mk = (ri, ro, phi) => {
+    const pts2 = [[-0.3, ri], [0, ri], [0.3, ri], [0.42, ri + 0.07], [0.42, ro - 0.05], [0.24, ro], [0, ro + 0.01], [-0.24, ro], [-0.42, ro - 0.05], [-0.42, ri + 0.07]];
+    const pts = pts2.map(([x, p]) => new V3(x, p * Math.cos(phi), p * Math.sin(phi)));
+    const f = new Flow(new THREE.CatmullRomCurve3(pts, true), { count: 9, speed: 0.08 }); flows.push(f); fieldG.add(f.group);
+  };
+  for (let k = 0; k < 4; k++) { const phi = Math.PI / 4 + k * Math.PI / 2; mk(0.045, 0.24, phi); mk(0.075, 0.33, phi); }
+  const axis = new Flow(new THREE.LineCurve3(new V3(-0.48, 0, 0), new V3(0.48, 0, 0)), { count: 7, speed: 0.12, closed: false });
+  flows.push(axis); fieldG.add(axis.group);
+  const nL = makeLabel('N', { color: '#ffffff', bg: 'rgba(224,49,49,0.92)', size: 0.06 });
+  const sL = makeLabel('S', { color: '#ffffff', bg: 'rgba(28,126,214,0.92)', size: 0.06 });
+  g.add(nL, sL);
+  const cL = makeLabel('電流（橘色點）', { color: '#d9480f', size: 0.034 }); cL.position.set(0, -0.15, 0.12); g.add(cL);
+  const hand = makeGripHand('拇指：N 極方向', '四指：電流繞向'); hand.position.set(0, 0.33, 0.02); hand.scale.setScalar(1.4); g.add(hand);
+  const btns = setCtx([
+    { label: '反轉電流', onClick: () => { st.sign *= -1; apply(); } },
+    { label: '右手：顯示', onClick: () => { st.hand = !st.hand; apply(); } },
+    { label: '磁力線：顯示', onClick: () => { st.field = !st.field; apply(); } },
+  ]);
+  function apply() {
+    dots.sign = st.sign; flows.forEach(f => f.sign = st.sign);
+    nL.position.set(0.5 * st.sign, 0.0, 0.0); sL.position.set(-0.5 * st.sign, 0.0, 0.0);
+    hand.quaternion.setFromUnitVectors(_Y, new V3(st.sign, 0, 0)); hand.visible = st.hand; fieldG.visible = st.field;
+    btns[1].setLabel(st.hand ? '右手：顯示' : '右手：隱藏'); btns[1].setActive(st.hand);
+    btns[2].setLabel(st.field ? '磁力線：顯示' : '磁力線：隱藏'); btns[2].setActive(st.field);
+    drawInfo('安培右手定則（螺線管）', [
+      ['四指沿著線圈中電流的繞行方向彎曲', '#c2410c'],
+      ['拇指所指的一端是 N 極（＝管內磁場方向）', '#1864ab'],
+      `目前 N 極在${st.sign > 0 ? '右' : '左'}端；管外磁力線從 N 極出發、繞回 S 極`,
+    ], '試試看：反轉電流，N、S 極會對調');
+  }
+  apply();
+  return { update(dt) { dots.update(dt); flows.forEach(f => f.update(dt)); } };
+}
+
+// 3) 載流導線受磁力：右手開掌定則
+function modeForce() {
+  const st = { iSign: 1, bSign: 1, I: 2, alpha: 0, hand: true, beta: 0, vel: 0 };
+  const g = new THREE.Group(); content.add(g);
+  const blockGeo = new THREE.BoxGeometry(0.4, 0.1, 0.3);
+  const top = new THREE.Mesh(blockGeo, mat(0xe03131)); top.position.y = 0.24;
+  const bot = new THREE.Mesh(blockGeo, mat(0x1c7ed6)); bot.position.y = -0.24;
+  g.add(top, bot);
+  const topL = makeLabel('N', { color: '#fff', bg: 'rgba(0,0,0,0)', size: 0.07 }); topL.position.set(0, 0.24, 0.16);
+  const botL = makeLabel('S', { color: '#fff', bg: 'rgba(0,0,0,0)', size: 0.07 }); botL.position.set(0, -0.24, 0.16);
+  g.add(topL, botL);
+  const field = [];
+  for (const x of [-0.15, -0.05, 0.05, 0.15]) for (const z of [-0.1, 0, 0.1]) {
+    if (x === 0.05 && z === 0) continue;
+    const f = new Flow(new THREE.LineCurve3(new V3(x, 0.18, z), new V3(x, -0.18, z)), { count: 3, speed: 0.35, closed: false, lineOpacity: 0.3 });
+    field.push(f); g.add(f.group);
+  }
+  const bLabel = makeLabel('磁場 B', { color: '#1864ab' }); bLabel.position.set(-0.27, 0.1, 0.12); g.add(bLabel);
+
+  const sw = new THREE.Group(); g.add(sw);
+  const frameM = mat(0x868e96, { metalness: 0.5 });
+  const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.84, 10), frameM); bar.rotation.z = Math.PI / 2; bar.position.y = 0.45; sw.add(bar);
+  for (const x of [-0.42, 0.42]) { const p = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.9, 10), frameM); p.position.set(x, 0.0, 0); sw.add(p); }
+  const pg = new THREE.Group(); pg.position.y = 0.45; sw.add(pg);
+  const wire = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.7, 14), mat(C.copper, { metalness: 0.6, roughness: 0.3 }));
+  wire.rotation.z = Math.PI / 2; wire.position.y = -0.45; pg.add(wire);
+  for (const x of [-0.33, 0.33]) { const t = new THREE.Mesh(new THREE.CylinderGeometry(0.0015, 0.0015, 0.45, 6), mat(0x495057)); t.position.set(x, -0.225, 0); pg.add(t); }
+  const dots = new Flow(new THREE.LineCurve3(new V3(-0.35, -0.45, 0), new V3(0.35, -0.45, 0)), { count: 10, color: 0xff922b, line: false, glyph: 'dot', closed: false, scale: 1.3 });
+  pg.add(dots.group);
+  const iArrow = new Arrow3(C.I, 0.007); pg.add(iArrow);
+  const fArrow = new Arrow3(C.F, 0.011); pg.add(fArrow);
+  const iL = makeLabel('電流 I', { color: '#d9480f', size: 0.035 }); pg.add(iL);
+  const fL = makeLabel('磁力 F', { color: '#2b8a3e', size: 0.04 }); pg.add(fL);
+  const hand = makeOpenHand(); hand.position.set(0.62, 0.02, 0.08); hand.scale.setScalar(1.35); g.add(hand);
+
+  const btns = setCtx([
+    { label: '反轉電流', onClick: () => { st.iSign *= -1; apply(); } },
+    { label: '反轉磁場', onClick: () => { st.bSign *= -1; apply(); } },
+    { label: '旋轉導線 90°', onClick: () => { st.alpha = (st.alpha + 1) % 4; apply(); } },
+    { label: '電流 −', onClick: () => { st.I = Math.max(0, st.I - 1); apply(); } },
+    { label: '電流 ＋', onClick: () => { st.I = Math.min(3, st.I + 1); apply(); } },
+    { label: '右手：顯示', onClick: () => { st.hand = !st.hand; apply(); } },
+  ]);
+  let fz = 0;
+  function apply() {
+    sw.rotation.y = st.alpha * Math.PI / 2;
+    const Iw = new V3(1, 0, 0).applyAxisAngle(_Y, sw.rotation.y).multiplyScalar(st.iSign);
+    const Bw = new V3(0, -st.bSign, 0), Fw = Iw.clone().cross(Bw);
+    fz = -st.iSign * st.bSign;                       // F 在擺動框架的本地 z 分量
+    top.material.color.set(st.bSign > 0 ? 0xe03131 : 0x1c7ed6); bot.material.color.set(st.bSign > 0 ? 0x1c7ed6 : 0xe03131);
+    topL.material.map = (st.bSign > 0 ? nTex : sTex); botL.material.map = (st.bSign > 0 ? sTex : nTex);
+    field.forEach(f => f.sign = st.bSign);
+    dots.sign = st.iSign; dots.speed = 0.12 * st.I; dots.group.visible = st.I > 0;
+    const c = new V3(0, -0.45, 0);
+    iArrow.visible = st.I > 0; iArrow.set(c.clone().add(new V3(0.12 * st.iSign, 0.025, 0)), new V3(st.iSign, 0, 0), 0.14);
+    fArrow.visible = st.I > 0; fArrow.set(c, new V3(0, 0, fz), 0.08 + 0.05 * st.I);
+    iL.position.set(0.3 * st.iSign, -0.4, 0); fL.position.set(0, -0.42, fz * (0.13 + 0.05 * st.I));
+    orientOpenHand(hand, Bw, Fw, Iw); hand.visible = st.hand;
+    btns[5].setLabel(st.hand ? '右手：顯示' : '右手：隱藏'); btns[5].setActive(st.hand);
+    drawInfo('右手開掌定則（載流導線受磁力）', [
+      ['拇指指向電流 I，四指指向磁場 B', '#c2410c'],
+      ['掌心推出去的方向 ＝ 導線受到的磁力 F（F ＝ I L × B）', '#2b8a3e'],
+      st.I === 0 ? '目前無電流：導線不受磁力'
+                 : `電流 ${dirWord(Iw)}、磁場 ${dirWord(Bw)} → 磁力 ${dirWord(Fw)}（電流越大，推得越遠）`,
+    ], '試試看：只反轉電流或只反轉磁場，力會反向；兩個都反轉呢？');
+  }
+  const nTex = topL.material.map, sTex = botL.material.map;
+  apply();
+  return {
+    update(dt) {
+      dots.update(dt); field.forEach(f => f.update(dt));
+      const target = -Math.asin(Math.min(0.3, fz * 0.028 * st.I / 0.45));
+      st.vel += (40 * (target - st.beta) - 4 * st.vel) * dt; st.beta += st.vel * dt;
+      pg.rotation.x = st.beta;
+    }
+  };
+}
+
+// 4) 挑戰題
+function modeQuiz() {
+  const st = { score: 0, total: 0 };
+  let g = null, q = null, upd = [];
+  const btns = setCtx([
+    { label: '下一題', onClick: () => newQ() },
+    { label: '看提示', onClick: () => { if (q) q.hint.visible = !q.hint.visible; } },
+    { label: '分數歸零', onClick: () => { st.score = st.total = 0; showPrompt(); } },
+  ]);
+  btns[0].setActive(true);
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const perp = v => SIX.filter(a => Math.abs(a.dot(v)) < 0.1);
+
+  function candidates(origin, answer) {
+    const list = [];
+    for (const a of SIX) {
+      const ar = new Arrow3(0x868e96, 0.009).set(origin, a, 0.12);
+      const hit = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.12, 8), new THREE.MeshBasicMaterial({ visible: false }));
+      hit.position.y = 0.06; ar.add(hit);
+      const ui = {
+        onClick: () => answerQ(ui),
+        setHover: h => { if (!q.done) ar.m.color.set(h ? 0xfab005 : 0x868e96); ar.m.emissive.set(h ? 0xfab005 : 0x868e96); },
+        arrow: ar, dir: a,
+      };
+      hit.userData.ui = ui; ar.shaft.userData.ui = ui; ar.head.userData.ui = ui;
+      sceneTargets.push(hit, ar.shaft, ar.head);
+      g.add(ar); list.push(ui);
+    }
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.014, 16, 12), glow(0xfab005)); dot.position.copy(origin); g.add(dot);
+    return list;
+  }
+  function wireAlong(I, len = 0.8) {
+    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, len, 14), mat(C.copper, { metalness: 0.6, roughness: 0.3 }));
+    w.quaternion.setFromUnitVectors(_Y, I); g.add(w);
+    const d = new Flow(new THREE.LineCurve3(I.clone().multiplyScalar(-len / 2), I.clone().multiplyScalar(len / 2)), { count: 12, color: 0xff922b, line: false, glyph: 'dot', closed: false, scale: 1.3, speed: 0.25 });
+    g.add(d.group); upd.push(d);
+    const ar = new Arrow3(C.I, 0.008).set(I.clone().multiplyScalar(len / 2 + 0.01), I, 0.1); g.add(ar);
+    const l = makeLabel('電流 I', { color: '#d9480f', size: 0.035 }); l.position.copy(I.clone().multiplyScalar(len / 2 + 0.16)); g.add(l);
+  }
+
+  function newQ() {
+    if (g) content.remove(g);
+    sceneTargets.length = 0; upd = [];
+    g = new THREE.Group(); content.add(g);
+    const type = pick(['wire', 'force', 'coil']);
+    q = { type, done: false, hint: new THREE.Group() };
+    g.add(q.hint); q.hint.visible = false;
+    if (type === 'wire') {
+      const I = pick(SIX), r = pick(perp(I)), P = r.clone().multiplyScalar(0.17);
+      wireAlong(I);
+      q.answer = I.clone().cross(r);
+      q.cands = candidates(P, q.answer);
+      const ring = new THREE.Group(); ring.quaternion.setFromUnitVectors(_Y, I);
+      const f = new Flow(new CircleCurve(0.17), { count: 7, speed: 0.08 }); ring.add(f.group); upd.push(f);
+      const hd = makeGripHand('拇指：電流 I', '四指：磁場 B'); hd.position.copy(I.clone().multiplyScalar(-0.2)); hd.quaternion.setFromUnitVectors(_Y, I); hd.scale.setScalar(1.2);
+      q.hint.add(ring, hd);
+      q.prompt = '直導線：黃色點的磁場方向是？';
+      q.why = '握住導線、拇指沿電流，四指在黃點處所指的方向就是磁場。';
+    } else if (type === 'force') {
+      const B = pick(SIX), I = pick(perp(B));
+      const u = perp(B).find(a => Math.abs(a.dot(I)) < 0.1), v = I;
+      for (const s1 of [-0.14, 0.14]) for (const s2 of [-0.18, 0, 0.18]) {
+        const o = u.clone().multiplyScalar(s1).add(v.clone().multiplyScalar(s2));
+        const f = new Flow(new THREE.LineCurve3(o.clone().addScaledVector(B, -0.22), o.clone().addScaledVector(B, 0.22)), { count: 3, speed: 0.35, closed: false, lineOpacity: 0.35 });
+        g.add(f.group); upd.push(f);
+      }
+      const bl = makeLabel('磁場 B', { color: '#1864ab', size: 0.035 }); bl.position.copy(u.clone().multiplyScalar(0.14).addScaledVector(B, 0.28)); g.add(bl);
+      wireAlong(I);
+      q.answer = I.clone().cross(B);
+      q.cands = candidates(new V3(), q.answer);
+      const hd = makeOpenHand(); hd.scale.setScalar(1.2); orientOpenHand(hd, B, q.answer, I); hd.position.copy(q.answer.clone().multiplyScalar(-0.08));
+      q.hint.add(hd);
+      q.prompt = '導線受力：導線受到的磁力方向是？';
+      q.why = '開掌：拇指沿電流、四指沿磁場，掌心推出的方向就是磁力。';
+    } else {
+      const sign = pick([1, -1]);
+      const rots = [[0, 0], [Math.PI / 2, 0], [Math.PI, 0], [-Math.PI / 2, 0], [0, Math.PI / 2], [0, -Math.PI / 2]];
+      const [yaw, roll] = pick(rots);
+      const cg = new THREE.Group(); cg.rotation.set(0, yaw, roll, 'YXZ'); g.add(cg);
+      upd.push(buildCoil(cg, sign, 0.4));
+      const cl = makeLabel('橘點＝電流', { color: '#d9480f', size: 0.032 }); cl.position.set(0, -0.16, 0); cg.add(cl);
+      cg.updateMatrixWorld();
+      q.answer = new V3(sign, 0, 0).applyQuaternion(cg.quaternion).round();
+      q.cands = candidates(new V3(), q.answer);
+      const hintG = new THREE.Group(); hintG.rotation.copy(cg.rotation); q.hint.add(hintG);
+      const hd = makeGripHand('拇指：N 極', '四指：電流繞向'); hd.position.set(0, 0.3, 0); hd.scale.setScalar(1.3); hd.quaternion.setFromUnitVectors(_Y, new V3(sign, 0, 0));
+      const nL = makeLabel('N', { color: '#fff', bg: 'rgba(224,49,49,0.92)', size: 0.05 }); nL.position.set(0.3 * sign, 0, 0);
+      hintG.add(hd, nL);
+      q.prompt = '螺線管：管內磁場（N 極）指向哪邊？';
+      q.why = '四指沿電流繞行方向彎曲，拇指所指就是 N 極。';
+    }
+    showPrompt();
+  }
+  function showPrompt(result) {
+    const lines = [[q.prompt, '#1d2733']];
+    if (!result) lines.push('用射線（或滑鼠）點選你認為正確的箭頭；可旋轉實驗台換角度看');
+    else lines.push(result);
+    if (q.done) lines.push([q.why, '#4f5d6c']);
+    drawInfo('挑戰題：判斷方向', lines, `目前成績：答對 ${st.score} ／ ${st.total} 題　　卡住了？按「看提示」顯示右手`);
+  }
+  function answerQ(ui) {
+    if (q.done) return;
+    q.done = true; st.total++;
+    const ok = ui.dir.dot(q.answer) > 0.9;
+    if (ok) st.score++;
+    for (const c of q.cands) {
+      const good = c.dir.dot(q.answer) > 0.9;
+      const col = good ? 0x2f9e44 : (c === ui ? 0xe03131 : 0xced4da);
+      c.arrow.m.color.set(col); c.arrow.m.emissive.set(col);
+      if (good) c.arrow.scale.setScalar(1.35);
+    }
+    q.hint.visible = true;
+    showPrompt(ok ? ['✔ 答對了！', '#2b8a3e'] : ['✘ 不對喔，正確答案是綠色箭頭', '#e03131']);
+  }
+  newQ();
+  return { update(dt) { upd.forEach(f => f.update(dt)); } };
+}
+
+/* ---------- picking ---------- */
+const raycaster = new THREE.Raycaster();
+function shown(o) { while (o) { if (!o.visible) return false; o = o.parent; } return true; }
+function hitTest() {
+  const list = [...uiTargets, ...ctxTargets, ...sceneTargets].filter(shown);
+  return raycaster.intersectObjects(list, false)[0] || null;
+}
+let hovered = new Set();
+function applyHover(set) {
+  for (const u of hovered) if (!set.has(u)) u.setHover(false);
+  for (const u of set) u.setHover(true);
+  hovered = set;
+}
+
+// desktop / phone
+const ndc = new THREE.Vector2(); let downAt = null;
+function setNdc(e) { ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); raycaster.setFromCamera(ndc, camera); }
+renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 6) return;
+  setNdc(e); const h = hitTest(); if (h) h.object.userData.ui.onClick();
+});
+renderer.domElement.addEventListener('pointermove', e => {
+  if (renderer.xr.isPresenting) return;
+  setNdc(e); const h = hitTest();
+  applyHover(new Set(h ? [h.object.userData.ui] : []));
+  renderer.domElement.style.cursor = h ? 'pointer' : 'grab';
+});
+
+// XR controllers + hands
+const ctrlFactory = new XRControllerModelFactory(), handFactory = new XRHandModelFactory();
+const ctrls = [], tmpM = new THREE.Matrix4();
+for (let i = 0; i < 2; i++) {
+  const c = renderer.xr.getController(i);
+  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new V3(), new V3(0, 0, -1)]), new THREE.LineBasicMaterial({ color: 0xd9480f }));
+  line.scale.z = 3; c.add(line); c.userData.line = line;
+  c.addEventListener('connected', e => { c.userData.src = e.data; line.visible = e.data.targetRayMode === 'tracked-pointer'; });
+  c.addEventListener('disconnected', () => { c.userData.src = null; });
+  c.addEventListener('selectstart', () => { rayFrom(c); const h = hitTest(); if (h) h.object.userData.ui.onClick(); });
+  rig.add(c); ctrls.push(c);
+  const grip = renderer.xr.getControllerGrip(i); grip.add(ctrlFactory.createControllerModel(grip)); rig.add(grip);
+  const hand = renderer.xr.getHand(i); hand.add(handFactory.createHandModel(hand, 'mesh')); rig.add(hand);
+}
+function rayFrom(c) {
+  tmpM.identity().extractRotation(c.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tmpM);
+}
+function xrInput(dt) {
+  const set = new Set();
+  for (const c of ctrls) {
+    if (!c.userData.src) continue;
+    rayFrom(c); const h = hitTest();
+    c.userData.line.scale.z = h ? h.distance : 3;
+    if (h) set.add(h.object.userData.ui);
+  }
+  applyHover(set);
+  const s = renderer.xr.getSession();
+  if (!s) return;
+  const rightCtrl = ctrls.find(c => c.userData.src && c.userData.src.handedness === 'right');
+  for (const src of s.inputSources) {
+    const gp = src.gamepad;
+    if (!gp || gp.axes.length < 4) continue;
+    const x = gp.axes[2], y = gp.axes[3];
+    if (src.handedness === 'left') {                  // 左搖桿：朝視線方向平滑移動
+      if (Math.hypot(x, y) > 0.15) {
+        camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize(); right.crossVectors(fwd, _Y);
+        rig.position.addScaledVector(fwd, -y * 1.4 * dt).addScaledVector(right, x * 1.4 * dt);
+        const r = Math.hypot(rig.position.x, rig.position.z);
+        if (r > 5) { rig.position.x *= 5 / r; rig.position.z *= 5 / r; }
+      }
+    } else if (src.handedness === 'right') {          // 右搖桿：往前推瞄準、放開瞬移；左右旋轉實驗台
+      if (y < -0.6 && rightCtrl) { aiming = true; aimArc(rightCtrl); }
+      else if (aiming && y > -0.3) {
+        aiming = false; arcLine.visible = false; marker.visible = false;
+        if (aimOK) { camera.getWorldPosition(headW); rig.position.x += land.x - headW.x; rig.position.z += land.z - headW.z; }
+      }
+      if (!aiming && Math.abs(x) > 0.25 && Math.abs(x) > Math.abs(y)) stationRoot.rotation.y += x * dt * 1.6;
+    }
+  }
+}
+// 瞬移拋物線
+const ARC_N = 48, arcPts = new Float32Array(ARC_N * 3);
+const arcGeo = new THREE.BufferGeometry(); arcGeo.setAttribute('position', new THREE.BufferAttribute(arcPts, 3));
+const arcLine = new THREE.Line(arcGeo, new THREE.LineBasicMaterial({ color: 0x1c7ed6 }));
+arcLine.visible = false; arcLine.frustumCulled = false; scene.add(arcLine);
+const marker = new THREE.Mesh(new THREE.RingGeometry(0.16, 0.22, 40), new THREE.MeshBasicMaterial({ color: 0x1c7ed6, side: THREE.DoubleSide }));
+marker.rotation.x = -Math.PI / 2; marker.visible = false; scene.add(marker);
+let aiming = false, aimOK = false;
+const land = new V3(), headW = new V3(), fwd = new V3(), right = new V3();
+function aimArc(c) {
+  rayFrom(c);
+  const o = raycaster.ray.origin, v = raycaster.ray.direction.clone().multiplyScalar(6), p = new V3();
+  let n = 0; aimOK = false;
+  for (let i = 0; i < ARC_N; i++) {
+    const t = i * 0.035;
+    p.set(o.x + v.x * t, o.y + v.y * t - 4.9 * t * t, o.z + v.z * t);
+    if (p.y <= 0) { p.y = 0; aimOK = Math.hypot(p.x, p.z) < 5.5; }
+    arcPts[i * 3] = p.x; arcPts[i * 3 + 1] = p.y; arcPts[i * 3 + 2] = p.z; n = i + 1;
+    if (p.y <= 0) break;
+  }
+  arcGeo.setDrawRange(0, n); arcGeo.attributes.position.needsUpdate = true;
+  land.copy(p); marker.position.set(p.x, 0.01, p.z); marker.visible = aimOK; arcLine.visible = true;
+  arcLine.material.color.set(aimOK ? 0x1c7ed6 : 0xe03131);
+}
+
+/* ---------- XR session buttons ---------- */
+const vrBtn = document.getElementById('enterVR'), arBtn = document.getElementById('enterAR'), statusEl = document.getElementById('status');
+async function startXR(mode) {
+  if (renderer.xr.isPresenting) return;
+  try {
+    const s = await navigator.xr.requestSession(mode, { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
+    const ar = mode === 'immersive-ar';
+    if (ar) { scene.background = null; env.visible = false; }
+    s.addEventListener('end', () => { scene.background = BG; env.visible = true; rig.position.set(0, 0, 0); aiming = false; arcLine.visible = marker.visible = false; frameDesktop(); });
+    await renderer.xr.setSession(s);
+  } catch (e) { statusEl.textContent = '無法啟動：' + e.message; }
+}
+vrBtn.onclick = () => startXR('immersive-vr');
+arBtn.onclick = () => startXR('immersive-ar');
+(async () => {
+  if (!('xr' in navigator)) { statusEl.textContent = '這個瀏覽器不支援 WebXR，仍可用滑鼠或觸控操作 3D 場景。請在 Quest 的 Browser 開啟本網址進入 VR。'; return; }
+  const [vr, ar] = await Promise.all([
+    navigator.xr.isSessionSupported('immersive-vr').catch(() => false),
+    navigator.xr.isSessionSupported('immersive-ar').catch(() => false),
+  ]);
+  vrBtn.disabled = !vr; arBtn.disabled = !ar;
+  statusEl.textContent = vr ? '裝置支援 VR，戴上頭盔後按「進入 VR」。' : '這台裝置不支援沉浸式 VR，可用滑鼠或觸控操作；請在 Quest 的 Browser 開啟本網址。';
+})();
+document.getElementById('fold').onclick = () => {
+  const o = document.getElementById('overlay'); o.classList.toggle('folded');
+  document.getElementById('fold').textContent = o.classList.contains('folded') ? '▸' : '▾';
+};
+
+/* ---------- 鍵盤走路（電腦） ---------- */
+const keys = new Set();
+const WALK_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ShiftLeft', 'ShiftRight'];
+addEventListener('keydown', e => { if (WALK_KEYS.includes(e.code)) { keys.add(e.code); if (e.code.startsWith('Arrow')) e.preventDefault(); } });
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+const kF = new V3(), kR = new V3(), kD = new V3();
+function keyWalk(dt) {
+  if (!keys.size) return;
+  const f = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
+  const r = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+  const u = (keys.has('KeyE') ? 1 : 0) - (keys.has('KeyQ') ? 1 : 0);
+  if (!f && !r && !u) return;
+  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 2.8 : 1.2) * dt;
+  camera.getWorldDirection(kF); kF.y = 0; kF.normalize(); kR.crossVectors(kF, _Y);
+  kD.set(0, 0, 0).addScaledVector(kF, f).addScaledVector(kR, r);
+  if (kD.lengthSq()) kD.normalize().multiplyScalar(speed);
+  kD.y = u * speed * 0.7;
+  const ny = camera.position.y + kD.y;                 // 眼睛高度限制在 0.3～2.6 公尺
+  if (ny < 0.3 || ny > 2.6) kD.y = 0;
+  const nx = camera.position.x + kD.x, nz = camera.position.z + kD.z, rr = Math.hypot(nx, nz);
+  if (rr > 5.5) { kD.x = 0; kD.z = 0; }                // 不走出地板
+  camera.position.add(kD); controls.target.add(kD); controls.update();
+}
+
+/* ---------- loop ---------- */
+setMode('wire');
+window.dbg = { camera, controls, setMode, stationRoot };
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (current) current.update(dt);
+  if (renderer.xr.isPresenting) xrInput(dt); else keyWalk(dt);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
